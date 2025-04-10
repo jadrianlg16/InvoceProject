@@ -15,7 +15,6 @@ except ImportError:
     PIL_AVAILABLE = False
     print("WARNING: Pillow library not found (pip install Pillow). PDF preview will be disabled.")
 
-# folio 878 casi no implementado # Keep comment
 
 # --- Regex Patterns ---
 # (Keep all existing regex patterns)
@@ -1094,3 +1093,4 @@ if __name__ == "__main__":
     root = tk.Tk()
     app = InvoiceProcessorApp(root)
     root.mainloop()
+
