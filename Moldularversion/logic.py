@@ -15,9 +15,19 @@ REGEX_ACTA_RANGE = r'Acta(?:s)?\s+Fuera\s+de\s+Protocolo\s+(?:N[uú]meros?|Nos.?
 REGEX_ACTA_RANGE_AL = r'Acta(?:s)?\s+Fuera\s+de\s+Protocolo\s+N[uú]meros?\s+(\d+)\s+AL\s+(\d+)\b' # Handles "NUMEROS start AL end"
 REGEX_ESCRITURA_LIST_Y = r'(?:Escritura|Esc)\s*(?:P[úu]blica)?\s*(?:N[uú]meros?|Nos.?|N°)\s+(\d+)\s+Y\s+(\d+)\b'
 REGEX_ACTA_LIST_Y = r'Acta(?:s)?\s+Fuera\s+de\s+Protocolo\s+(?:N[uú]meros?|Nos.?|N°)\s+(\d+)\s+Y\s+(\d+)\b'
-REGEX_ACTA_SPECIAL = r'Acta\s+Fuera\s+de\s+Protocolo\s+N[uú]mero\s+\d+/(\d+)/\d+\b'
-REGEX_ESCRITURA_SINGLE = r'(?:Escritura|Esc)\s*(?:P[úu]blica)?\s*(?:N[uú]mero|No.?|N°)?\s*[-:\s]?\s*(\d+)\b(?!\s+A\s+\d+)'
+# Updated to capture all numbers in formats like 016/18428/18
+REGEX_ACTA_SPECIAL = r'Acta\s+Fuera\s+de\s+Protocolo\s+N[uú]mero\s+(\d+)(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?(?:/(\d+))?\b'
+REGEX_ESCRITURA_SINGLE = r'(?:Escritura|Esc)\s*(?:P[úu]blica)?\s*(?:N[uú]mero|No.?|N°)?\s*[-:\s]?\s*(\d+)\b(?!\s+A\s+\d+)(?!/)' # Added negative lookahead for / to avoid dates
 REGEX_ACTA_SINGLE = r'Acta\s+Fuera\s+de\s+Protocolo\s+(?:N[uú]mero|No.?|N°)?\s*[-:\s]?\s*(\d+)\b(?!\s+(?:A|AL)\s+\d+)'
+# New patterns for DBA Instrumentos format
+# For Escrituras
+REGEX_INSTRUMENTOS_ESC_SINGLE = r'Instrumentos\s*-\s*Esc\s+(\d+)\b(?!\s*,)'
+REGEX_INSTRUMENTOS_ESC_COMMA = r'Instrumentos\s*-\s*Esc\s+(\d+)(?:\s*,\s*Esc\s+(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?'
+# For Actas
+REGEX_INSTRUMENTOS_ACT_SINGLE = r'Instrumentos\s*-\s*Act(?:a)?\s+(\d+)\b(?!\s*,)'
+REGEX_INSTRUMENTOS_ACT_COMMA = r'Instrumentos\s*-\s*Act(?:a)?\s+(\d+)(?:\s*,\s*Act(?:a)?\s+(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?'
+# For combined Esc and Act in the same Instrumentos entry
+REGEX_INSTRUMENTOS_COMBINED = r'Instrumentos\s*-\s*(?:Esc\s+(\d+)(?:\s*,\s*(?:Esc\s+)?(\d+))?(?:\s*,\s*(?:Esc\s+)?(\d+))?)?(?:\s*,\s*Act(?:a)?\s+(\d+)(?:\s*,\s*(?:Act(?:a)?\s+)?(\d+))?(?:\s*,\s*(?:Act(?:a)?\s+)?(\d+))?)?'
 REGEX_FOLIO_DBA = r'(?i)\bSerie\s(?:RP)?\sFolio\s(\d+)\b' # Text search fallback
 REGEX_FOLIO_DBA_ALT = r'(?i)DATOS\s+CFDI.?Folio:\s(\d+)' # Text search fallback
 REGEX_FOLIO_TOTALNOT = r'(?i)Folio\s+interno:\s*(\w+)\b'
@@ -149,15 +159,80 @@ def find_folio(text, invoice_type, filename=None):
 # They can be customized later for each invoice type's specific format.
 
 def find_references_dba(text):
-    """Extracts Escritura and Acta references from text. (DBA specific - currently generic)"""
+    """Extracts Escritura and Acta references from text. (DBA specific - with Instrumentos format support)"""
     references = []
     if not text: return []
+
+    # Define patterns to exclude (dates, etc.)
+    exclude_patterns = [
+        r'Fecha\s+(?:de\s+)?Escritura\s*:\s*\d{1,2}/\d{1,2}/\d{2,4}',  # Fecha Escritura: 29/11/2023
+        r'Fecha\s+(?:de\s+)?Acta\s*:\s*\d{1,2}/\d{1,2}/\d{2,4}'        # Fecha Acta: 29/11/2023
+    ]
+
+    # Remove or mask text matching exclude patterns
+    text_for_processing = text
+    for pattern in exclude_patterns:
+        text_for_processing = re.sub(pattern, "EXCLUDED_DATE", text_for_processing, flags=re.IGNORECASE)
+
+    # Debug log
+    if text != text_for_processing:
+        print(f"DEBUG: Excluded date patterns from text for reference extraction")
 
     found_escritura_numbers = set()
     found_acta_numbers = set()
     flags = re.IGNORECASE | re.UNICODE
 
-    # Ranges and Lists First
+    # First check for Instrumentos format (DBA specific)
+    instrumentos_patterns = [
+        (REGEX_INSTRUMENTOS_ESC_SINGLE, "Escritura", found_escritura_numbers),
+        (REGEX_INSTRUMENTOS_ESC_COMMA, "Escritura", found_escritura_numbers),
+        (REGEX_INSTRUMENTOS_ACT_SINGLE, "Acta Fuera de Protocolo", found_acta_numbers),
+        (REGEX_INSTRUMENTOS_ACT_COMMA, "Acta Fuera de Protocolo", found_acta_numbers)
+    ]
+
+    # Process all standard Instrumentos patterns
+    for pattern, type_name, found_set in instrumentos_patterns:
+        for match in re.finditer(pattern, text_for_processing, flags):
+            try:
+                # Process all groups that might contain numbers
+                for i in range(1, len(match.groups()) + 1):
+                    if match.group(i):
+                        num_str = match.group(i).strip()
+                        if num_str and num_str.isdigit() and num_str not in found_set:
+                            print(f"DEBUG: Found {type_name} number {num_str} in Instrumentos format")
+                            references.append({"Type": type_name, "Number": num_str})
+                            found_set.add(num_str)
+            except (ValueError, IndexError) as e:
+                print(f"Warning: Could not parse Instrumentos numbers from pattern {pattern}: {match.groups()} - Error: {e}")
+                pass
+
+    # Process combined Esc and Act pattern separately
+    for match in re.finditer(REGEX_INSTRUMENTOS_COMBINED, text_for_processing, flags):
+        try:
+            # Groups 1-3 are Escritura numbers
+            for i in range(1, 4):
+                if match.group(i):
+                    num_str = match.group(i).strip()
+                    if num_str and num_str.isdigit() and num_str not in found_escritura_numbers:
+                        print(f"DEBUG: Found Escritura number {num_str} in combined Instrumentos format")
+                        references.append({"Type": "Escritura", "Number": num_str})
+                        found_escritura_numbers.add(num_str)
+
+            # Groups 4-6 are Acta numbers
+            for i in range(4, 7):
+                if match.group(i):
+                    num_str = match.group(i).strip()
+                    if num_str and num_str.isdigit() and num_str not in found_acta_numbers:
+                        print(f"DEBUG: Found Acta Fuera de Protocolo number {num_str} in combined Instrumentos format")
+                        references.append({"Type": "Acta Fuera de Protocolo", "Number": num_str})
+                        found_acta_numbers.add(num_str)
+        except (ValueError, IndexError) as e:
+            print(f"Warning: Could not parse combined Instrumentos numbers: {match.groups()} - Error: {e}")
+            pass
+
+
+
+    # Ranges and Lists First (standard patterns)
     patterns_and_types = [
         (REGEX_ESCRITURA_RANGE, "Escritura", found_escritura_numbers, True),
         (REGEX_ACTA_RANGE, "Acta Fuera de Protocolo", found_acta_numbers, True),
@@ -169,7 +244,7 @@ def find_references_dba(text):
 
     for pattern, type_name, found_set, is_range, *special in patterns_and_types:
         use_special_grouping = special and special[0]
-        for match in re.finditer(pattern, text, flags):
+        for match in re.finditer(pattern, text_for_processing, flags):
             try:
                 if is_range:
                     start, end = int(match.group(1)), int(match.group(2))
@@ -180,10 +255,14 @@ def find_references_dba(text):
                                 references.append({"Type": type_name, "Number": num_str})
                                 found_set.add(num_str)
                 elif use_special_grouping:
-                     num_str = match.group(1).strip()
-                     if num_str and num_str.isdigit() and num_str not in found_set:
-                         references.append({"Type": type_name, "Number": num_str})
-                         found_set.add(num_str)
+                    # Process all groups for special patterns (like ACTA_SPECIAL with multiple numbers)
+                    for i in range(1, len(match.groups()) + 1):
+                        if match.group(i):
+                            num_str = match.group(i).strip()
+                            if num_str and num_str.isdigit() and num_str not in found_set:
+                                print(f"DEBUG: Found {type_name} number {num_str} in special format")
+                                references.append({"Type": type_name, "Number": num_str})
+                                found_set.add(num_str)
                 else: # Is List ("Y")
                     num1_str = match.group(1).strip()
                     if num1_str and num1_str.isdigit() and num1_str not in found_set:
@@ -205,7 +284,7 @@ def find_references_dba(text):
     for pattern, type_name, found_set in single_patterns:
          # Use finditer to get all non-overlapping matches
          potential_singles = []
-         for m in re.finditer(pattern, text, flags):
+         for m in re.finditer(pattern, text_for_processing, flags):
              num_candidate = m.group(1).strip()
              if num_candidate and num_candidate.isdigit():
                  # Add check: ensure it wasn't part of a range/list already processed
